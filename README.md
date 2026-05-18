@@ -4,26 +4,26 @@ A backend system for a multi-floor smart parking lot. It assigns spots
 based on vehicle size, tracks each vehicle's stay, calculates fees on
 exit, and exposes real-time availability — all of it concurrency-safe.
 
-This repo ships **two parallel implementations** with byte-identical APIs
-and equivalent test rigor — pick whichever stack you prefer.
-
-| Implementation | Stack | Folder | Status |
-|---|---|---|---|
-| **Python** (primary) | FastAPI · SQLAlchemy 2.0 · Pydantic v2 · pytest | [`./`](./) | 23/23 tests passing |
-| **Node.js + TypeScript** | Fastify 5 · Drizzle ORM · Zod · Vitest · `worker_threads` | [`./node-ts/`](./node-ts/) | 22/22 tests passing |
-
-The two implementations share the same data model, allocation
-algorithm, fee logic, and concurrency strategy. The Node side uses
-`worker_threads` + `SharedArrayBuffer` + `Atomics` for its 50-thread
-concurrency test — equivalent rigor to Python's `threading.Barrier`.
-
-> The rest of this README documents the **Python** implementation. See
-> [`node-ts/README.md`](./node-ts/README.md) for the Node version.
+Built with **Node.js 20**, **TypeScript**, **Fastify**, **Drizzle ORM**,
+and **better-sqlite3**. Validation by **Zod**, tests by **Vitest**.
 
 ---
 
-Built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**. Runs on
-SQLite out of the box; point `DATABASE_URL` at PostgreSQL for production.
+## How this maps to the brief
+
+| Brief requirement | Implementation | Verified by |
+|---|---|---|
+| **Spot allocation by vehicle size** (motorcycle / car / bus) | `src/services/allocation-service.ts` — smallest-fit with size-based fallback | `tests/allocation.test.ts` |
+| **Check-in / check-out + entry & exit times** | `src/services/parking-service.ts` writes `entry_time` on check-in, `exit_time` and `amount` on check-out, persisted on `parking_ticket` | `tests/allocation.test.ts`, `tests/api.test.ts` |
+| **Fee calculation by duration & vehicle type** | `src/services/fee-service.ts` — per-vehicle hourly rates, minimum-charge, ceil-to-hour, daily cap | `tests/fee-calculation.test.ts` |
+| **Real-time availability** | `src/services/parking-service.ts::availability` — single `GROUP BY` query; spot `status` flips atomically on every check-in/out so reads always reflect current state | `tests/api.test.ts` |
+
+| Design aspect from the brief | Where it lives |
+|---|---|
+| **Data model** | `src/db/schema.ts` (5 tables: parking_lot, floor, parking_spot, vehicle, parking_ticket) + `docs/ER_DIAGRAM.md` |
+| **Allocation algorithm** | `src/services/allocation-service.ts` + walkthrough in `docs/ARCHITECTURE.md §2` |
+| **Fee calculation logic** | `src/services/fee-service.ts` (pure function, returns `FeeQuote`) + `docs/ARCHITECTURE.md §3` |
+| **Concurrency handling** | Atomic conditional UPDATE — `docs/ARCHITECTURE.md §4`. Verified by a 50-thread `worker_threads` race test |
 
 ---
 
@@ -35,11 +35,15 @@ SQLite out of the box; point `DATABASE_URL` at PostgreSQL for production.
 - **Atomic check-in.** Spot transitions use a conditional `UPDATE ...
   WHERE status = 'AVAILABLE'`, which is atomic in every relational DB.
   Two concurrent vehicles can never claim the same spot.
-- **Verified concurrency.** A 50-thread test races for 10 spots and
-  asserts exactly 10 unique winners with zero double-allocations.
+- **Verified concurrency.** A test launches **50 worker threads**, each
+  with its own `better-sqlite3` connection, and uses a
+  `SharedArrayBuffer` + `Atomics` barrier to release them
+  simultaneously. Asserts exactly 10 unique winners with zero
+  double-allocations.
 - **Configurable fee policy.** Per-vehicle hourly rates, minimum
-  chargeable duration, and a daily cap, all in `app/config.py`.
+  chargeable duration, and a daily cap, all in `src/config.ts`.
 - **Real-time availability** per spot type, computed in a single query.
+- **Auto-generated Swagger UI** at `/docs` — no extra schemas to write.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design
 narrative and [`docs/ER_DIAGRAM.md`](docs/ER_DIAGRAM.md) for the data
@@ -50,27 +54,18 @@ model.
 ## Quick start
 
 ```bash
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS/Linux
-source .venv/bin/activate
-
-pip install -r requirements.txt
-
-uvicorn app.main:app --reload
+npm install
+npm run dev          # http://127.0.0.1:8000  →  /docs for Swagger UI
 ```
-
-Open <http://127.0.0.1:8000/docs> for the interactive Swagger UI.
 
 ### Run the tests
 
 ```bash
-pytest -v
+npm test
 ```
 
-23 tests cover allocation rules, fee math, concurrent check-in races,
-and the HTTP API.
+22 tests covering allocation rules, fee math, end-to-end HTTP, and a
+**real 50-thread concurrency race**.
 
 ---
 
@@ -153,23 +148,31 @@ GET /api/v1/lots/{lot_id}/availability
 ## Project layout
 
 ```
-app/
-  main.py              # FastAPI app factory
-  config.py            # Settings (rates, retries, DB URL)
-  database.py          # Engine + session + Base
-  exceptions.py        # Domain errors -> HTTP codes
-  models/              # SQLAlchemy ORM models + enums
-  schemas/             # Pydantic I/O schemas
+src/
+  main.ts                          # entry point
+  app.ts                           # Fastify app factory + Swagger
+  app-context.ts                   # DI container
+  config.ts                        # env-var settings (Zod)
+  exceptions.ts                    # domain errors -> HTTP codes
+  schemas.ts                       # Zod request/response schemas
+  types/enums.ts                   # VehicleType, SpotType, ...
+  db/
+    index.ts                       # drizzle + better-sqlite3
+    schema.ts                      # Drizzle table definitions
   services/
-    fee_service.py         # Fee strategy
-    allocation_service.py  # Concurrency-safe spot claim
-    parking_service.py     # check-in / check-out orchestration
-  api/v1/              # Routers: admin, parking, spots
+    fee-service.ts                 # FeeCalculator (pure)
+    allocation-service.ts          # atomic conditional UPDATE
+    parking-service.ts             # check-in/check-out orchestrator
+  routes/
+    admin.ts                       # POST /admin/lots
+    parking.ts                     # POST check-in / check-out
+    spots.ts                       # GET availability
 tests/
-  test_allocation.py     # vehicle-size matching, fallbacks
-  test_fee_calculation.py# rate, rounding, caps
-  test_concurrency.py    # 50-thread race, idempotency
-  test_api.py            # end-to-end HTTP
+  helpers/                         # DB setup + worker shim
+  fee-calculation.test.ts
+  allocation.test.ts
+  api.test.ts
+  concurrency.test.ts              # 50 threads, 10 spots, no double-allocation
 docs/
   ARCHITECTURE.md
   ER_DIAGRAM.md
@@ -181,15 +184,17 @@ docs/
 
 Environment variables (or a `.env` file in the project root):
 
-| Variable                     | Default                  | Notes                                          |
-| ---------------------------- | ------------------------ | ---------------------------------------------- |
-| `DATABASE_URL`               | `sqlite:///./parking.db` | Use a Postgres URL in production               |
-| `FEE_MOTORCYCLE_PER_HOUR`    | `1.0`                    |                                                |
-| `FEE_CAR_PER_HOUR`           | `2.0`                    |                                                |
-| `FEE_BUS_PER_HOUR`           | `5.0`                    |                                                |
-| `FEE_MINIMUM_MINUTES`        | `15`                     | Minimum chargeable duration                    |
-| `FEE_DAILY_CAP_HOURS`        | `24`                     | Caps super-long stays at one day's worth       |
-| `ALLOCATION_MAX_RETRIES`     | `5`                      | Retries when losing the conditional-UPDATE race|
+| Variable                  | Default                  | Notes                                          |
+| ------------------------- | ------------------------ | ---------------------------------------------- |
+| `PORT`                    | `8000`                   | HTTP port                                      |
+| `HOST`                    | `127.0.0.1`              | Bind address                                   |
+| `DATABASE_URL`            | `file:./parking.db`      | `file:` URI or raw path; SQLite by default     |
+| `FEE_MOTORCYCLE_PER_HOUR` | `1.0`                    |                                                |
+| `FEE_CAR_PER_HOUR`        | `2.0`                    |                                                |
+| `FEE_BUS_PER_HOUR`        | `5.0`                    |                                                |
+| `FEE_MINIMUM_MINUTES`     | `15`                     | Minimum chargeable duration                    |
+| `FEE_DAILY_CAP_HOURS`     | `24`                     | Caps super-long stays at one day's worth       |
+| `ALLOCATION_MAX_RETRIES`  | `5`                      | Retries when losing the conditional-UPDATE race|
 
 ---
 

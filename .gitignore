@@ -1,35 +1,18 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.egg-info/
-.eggs/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-build/
+node_modules/
 dist/
+*.log
 
-# Virtual envs
-.venv/
-venv/
-env/
-
-# Local DB / artifacts
+# Local DBs
+*.sqlite
 *.sqlite3
 *.db
 parking.db*
 
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# OS
+# Editor / OS
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
 
 # Env
 .env

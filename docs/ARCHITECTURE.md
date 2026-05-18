@@ -12,30 +12,31 @@ The brief asks for four things; each maps to one section below:
 3. **Fee calculation** based on duration and vehicle type.
 4. **Concurrency** that holds up when many vehicles arrive at once.
 
-The implementation is split into four layers — **Models → Repositories
-(via SQLAlchemy queries) → Services → API** — so each concern is
-testable in isolation.
+The implementation is split into four layers — **Schema → Services →
+Routes → App** — so each concern is testable in isolation.
 
 ```
 HTTP request
     │
     ▼
-┌───────────────┐
-│  FastAPI API  │  request validation, error mapping
-└──────┬────────┘
+┌──────────────────────────┐
+│  Fastify routes          │  request validation (Zod), error mapping
+│  src/routes/*.ts         │
+└──────┬───────────────────┘
        ▼
-┌───────────────┐
-│   Services    │  business rules, transactions
-│ ParkingService│
-│ AllocationSvc │
-│ FeeCalculator │
-└──────┬────────┘
+┌──────────────────────────┐
+│  Services                │  business rules, transactions
+│  ParkingService          │
+│  AllocationService       │
+│  FeeCalculator           │
+└──────┬───────────────────┘
        ▼
-┌───────────────┐
-│   ORM Models  │  schema, constraints, conditional UPDATEs
-└──────┬────────┘
+┌──────────────────────────┐
+│  Drizzle ORM             │  schema, conditional UPDATEs, queries
+│  src/db/schema.ts        │
+└──────┬───────────────────┘
        ▼
-   Database
+   better-sqlite3 (SQLite)
 ```
 
 ---
@@ -91,7 +92,7 @@ query on the check-in path.
 
 ## 2 · Allocation algorithm
 
-`AllocationService.allocate(db, lot_id, vehicle_type)` is the entry
+`AllocationService.allocate(db, { lotId, vehicleType })` is the entry
 point. The intent is:
 
 > Park the vehicle in the **smallest spot it fits in**, leaving larger
@@ -105,11 +106,15 @@ The vehicle → spot compatibility table:
 | Car        | `COMPACT` → `LARGE`                     |
 | Bus        | `LARGE` only                            |
 
-This is encoded as a single ordinal scale in `models/enums.py`:
+This is encoded as a single ordinal scale in `src/types/enums.ts`:
 
-```python
-SPOT_SIZE_ORDER = {MOTORCYCLE: 0, COMPACT: 1, LARGE: 2}
-VEHICLE_MIN_SPOT = {MOTORCYCLE: MOTORCYCLE, CAR: COMPACT, BUS: LARGE}
+```ts
+const SPOT_SIZE_ORDER = { MOTORCYCLE: 0, COMPACT: 1, LARGE: 2 };
+const VEHICLE_MIN_SPOT = {
+  MOTORCYCLE: SpotType.MOTORCYCLE,
+  CAR: SpotType.COMPACT,
+  BUS: SpotType.LARGE,
+};
 ```
 
 Adding a new size (e.g. `OVERSIZED`) is a one-line change.
@@ -117,27 +122,27 @@ Adding a new size (e.g. `OVERSIZED`) is a one-line change.
 ### Algorithm
 
 ```
-for spot_type in compatible_spot_types(vehicle_type):
+for spotType in compatibleSpotTypes(vehicleType):
     for retry in 0..MAX_RETRIES:
-        candidates = SELECT ... FROM parking_spot
+        candidates = SELECT id FROM parking_spot
                      WHERE lot_id = ? AND spot_type = ?
                        AND status = 'AVAILABLE'
-                     ORDER BY floor.number, spot.id
+                     ORDER BY floor.number, parking_spot.id
                      LIMIT BATCH
 
         for c in candidates:
-            if conditional_update(c.id) == 1 row affected:
-                return c          ← we won the race
+            if conditionalUpdate(c.id) had 1 row affected:
+                return c.id          ← we won the race
 
         # Lost every candidate in this batch — re-read.
-raise NoSpotAvailable
+throw NoSpotAvailable
 ```
 
 **Why a batch of candidates?** Under heavy contention, the first
-candidate is also the first candidate every other thread sees, so
-they all collide on it. Pulling a small batch (8 by default) gives
-each loser a different fallback to try without re-querying — a
-ten-line optimization that turns N rounds of contention into ~1.
+candidate is also the first candidate every other thread sees, so they
+all collide on it. Pulling a small batch (8 by default) gives each
+loser a different fallback to try without re-querying — a ten-line
+optimization that turns N rounds of contention into ~1.
 
 **Why iterate spot types in order?** Buses must never park in compacts;
 cars must prefer compacts before falling back to large. The ordered
@@ -148,14 +153,14 @@ loop encodes that policy declaratively.
 ## 3 · Fee calculation
 
 `FeeCalculator.quote()` is intentionally a pure function. Given
-`(vehicle_type, entry_time, exit_time)` it returns a `FeeQuote`:
+`(vehicleType, entryTime, exitTime)` it returns a `FeeQuote`:
 
 ```
-duration_minutes = ceil((exit - entry).total_seconds() / 60)
-chargeable_minutes = max(duration_minutes, MIN_CHARGE_MIN)
-chargeable_hours   = max(1, ceil(chargeable_minutes / 60))
-chargeable_hours   = min(chargeable_hours, DAILY_CAP_HOURS)
-amount = chargeable_hours * RATE[vehicle_type]
+durationMinutes   = ceil((exit - entry) / 60_000)
+chargeableMinutes = max(durationMinutes, MIN_CHARGE_MIN)
+chargeableHours   = max(1, ceil(chargeableMinutes / 60))
+chargeableHours   = min(chargeableHours, DAILY_CAP_HOURS)
+amount            = chargeableHours * RATE[vehicleType]
 ```
 
 Why these specific rules:
@@ -168,15 +173,17 @@ Why these specific rules:
   industry behaviour.
 - **Daily cap (24h default)** — long stays don't blow up linearly.
 
-All four parameters live in `Settings` and can be overridden per-deploy
-without changing the calculator. Unit tests pin every branch.
+All four parameters live in `Settings` (Zod-validated env vars) and can
+be overridden per-deploy without changing the calculator. Unit tests
+pin every branch.
 
-### Why naive datetimes are dangerous
+### Why dates need careful handling
 
-SQLite stores `DateTime(timezone=True)` columns as naive. The fee
-calculator normalizes both inputs to UTC **before** comparison, so the
-mix of "DB-roundtripped naive" and "freshly created aware" datetimes
-that you get in real flows doesn't crash the math.
+JavaScript `Date` is famously quirky around timezones. The fee
+calculator accepts either a `string` (ISO 8601) or a `Date` object,
+parses both via `Date.parse`, and works in epoch milliseconds for the
+duration math. SQLite stores datetimes as ISO strings, so a value
+written by Drizzle round-trips losslessly.
 
 ---
 
@@ -201,26 +208,39 @@ Every relational database guarantees:
 - The `WHERE` clause is evaluated and the `SET` is applied as a single
   atomic step.
 - Exactly one transaction's update wins; the other(s) report
-  `rowcount == 0`.
+  `result.changes === 0`.
 
 This is **portable** — works the same on SQLite, Postgres, MySQL — and
 **non-blocking** — losers don't sit in a lock queue, they immediately
 retry with a different candidate. We don't need `SELECT ... FOR UPDATE`
 or application-level locks.
 
+Drizzle's update builder calls into better-sqlite3 which surfaces
+`result.changes` directly:
+
+```ts
+const result = db
+  .update(parkingSpot)
+  .set({ status: SpotStatus.OCCUPIED, version: sql`${parkingSpot.version} + 1` })
+  .where(and(eq(parkingSpot.id, spotId), eq(parkingSpot.status, SpotStatus.AVAILABLE)))
+  .run();
+
+return result.changes === 1; // true → we won
+```
+
 ### Compensation on partial failure
 
-`ParkingService.check_in` claims the spot first, then writes the
-ticket row. If the ticket insert fails (FK violation, etc.), we
-compensate by releasing the spot:
+`ParkingService.checkIn` claims the spot first, then writes the ticket
+row. If the ticket insert fails, we compensate by releasing the spot:
 
-```python
-spot = allocator.allocate(...)          # commits the spot transition
-try:
-    db.add(ticket); db.commit()
-except Exception:
-    allocator.release(spot_id=spot.id)   # release on rollback
-    raise
+```ts
+const spotId = allocator.allocate(db, args);
+try {
+  db.insert(parkingTicket).values({ ... }).run();
+} catch (err) {
+  allocator.release(db, spotId);
+  throw err;
+}
 ```
 
 This keeps the two writes consistent without a distributed transaction.
@@ -230,8 +250,8 @@ This keeps the two writes consistent without a distributed transaction.
 Check-out closes the ticket *before* freeing the spot:
 
 ```
-1. ticket.status = COMPLETED            (commit 1)
-2. spot.status   = AVAILABLE            (commit 2)
+1. ticket.status = COMPLETED            (write 1)
+2. spot.status   = AVAILABLE            (write 2)
 ```
 
 If the process crashes between steps 1 and 2, we end up with a
@@ -242,14 +262,21 @@ ACTIVE ticket would be **double-allocated** to the next vehicle).
 
 ### Verified by test
 
-`tests/test_concurrency.py::test_no_double_allocation_under_contention`
-spawns 50 threads behind a `threading.Barrier`, releases them
-simultaneously, and asserts:
+`tests/concurrency.test.ts` spawns **50 worker threads**, each opening
+its own `better-sqlite3` connection on a shared DB file. A
+`SharedArrayBuffer` + `Atomics.wait` / `Atomics.notify` barrier
+releases them all in the same instant.
+
+The test asserts:
 
 - exactly `min(threads, capacity)` succeeded,
 - every claimed spot id is unique,
-- the rest got `NoSpotAvailable`,
+- the rest threw `NoSpotAvailable`,
 - no unexpected exceptions occurred.
+
+This is the strongest possible test of the concurrency model in a
+single-process Node app — real OS threads, real DB-level contention,
+real atomic semantics.
 
 ---
 
@@ -258,15 +285,16 @@ simultaneously, and asserts:
 What this codebase intentionally *doesn't* do, so a reviewer can map
 the gaps:
 
-- **Authentication / RBAC.** Add a JWT dependency on `/admin/*`.
-- **Migrations.** `init_db()` is fine for demos; production wants
-  Alembic.
+- **Authentication / RBAC.** Add a Fastify auth plugin on `/admin/*`.
+- **Migrations.** `initSchema()` is fine for demos; production wants
+  Drizzle migrations (`drizzle-kit generate`).
 - **Payment.** `amount` is computed but not collected. Drop in a payment
-  provider on top of `check_out`.
-- **Observability.** Add structured logging + OpenTelemetry traces
-  around `check_in` / `check_out`.
-- **Rate-limiting.** Cheap protection against scrapers hammering
-  `/availability`.
+  provider on top of `checkOut`.
+- **Observability.** Add structured logging via Fastify's logger and
+  OpenTelemetry traces around `checkIn` / `checkOut`.
+- **Rate-limiting.** `@fastify/rate-limit` is a 5-line addition.
 - **Postgres in production.** SQLite's WAL mode handles the load
-  here, but Postgres gives row-level locks, replication, and `LISTEN/
-  NOTIFY` if availability needs to push instead of poll.
+  here, but Postgres gives row-level locks, replication, and
+  `LISTEN / NOTIFY` if availability needs to push instead of poll.
+  The atomic conditional-UPDATE pattern works identically on Postgres
+  via `drizzle-orm/postgres-js`.

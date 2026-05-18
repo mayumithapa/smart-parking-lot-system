@@ -11,7 +11,7 @@ erDiagram
         int     id PK
         string  name      "UNIQUE"
         string  address
-        datetime created_at
+        string  created_at
     }
 
     FLOOR {
@@ -34,17 +34,17 @@ erDiagram
         int     id PK
         string  license_plate "UNIQUE, uppercase"
         enum    vehicle_type  "MOTORCYCLE | CAR | BUS"
-        datetime created_at
+        string  created_at
     }
 
     PARKING_TICKET {
         int     id PK
         int     vehicle_id FK
         int     spot_id FK
-        datetime entry_time
-        datetime exit_time
-        float    amount
-        enum     status   "ACTIVE | COMPLETED | LOST"
+        string  entry_time
+        string  exit_time
+        float   amount
+        enum    status   "ACTIVE | COMPLETED | LOST"
     }
 ```
 
@@ -54,8 +54,7 @@ erDiagram
 - **Floor ↔ Spot**: one-to-many; a spot belongs to exactly one floor.
 - **Vehicle ↔ Ticket**: one-to-many; a vehicle is reused across visits.
   At most one ticket per vehicle is `ACTIVE` at a time, enforced by the
-  application's `_active_ticket_for_vehicle` check before each
-  check-in.
+  application's `hasActiveTicket` check before each check-in.
 - **Spot ↔ Ticket**: one-to-many over time; at most one ticket per spot
   is `ACTIVE` at a time, enforced by the spot's `status` flag.
 
