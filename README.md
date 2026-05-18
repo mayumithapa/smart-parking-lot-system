@@ -4,6 +4,24 @@ A backend system for a multi-floor smart parking lot. It assigns spots
 based on vehicle size, tracks each vehicle's stay, calculates fees on
 exit, and exposes real-time availability — all of it concurrency-safe.
 
+This repo ships **two parallel implementations** with byte-identical APIs
+and equivalent test rigor — pick whichever stack you prefer.
+
+| Implementation | Stack | Folder | Status |
+|---|---|---|---|
+| **Python** (primary) | FastAPI · SQLAlchemy 2.0 · Pydantic v2 · pytest | [`./`](./) | 23/23 tests passing |
+| **Node.js + TypeScript** | Fastify 5 · Drizzle ORM · Zod · Vitest · `worker_threads` | [`./node-ts/`](./node-ts/) | 22/22 tests passing |
+
+The two implementations share the same data model, allocation
+algorithm, fee logic, and concurrency strategy. The Node side uses
+`worker_threads` + `SharedArrayBuffer` + `Atomics` for its 50-thread
+concurrency test — equivalent rigor to Python's `threading.Barrier`.
+
+> The rest of this README documents the **Python** implementation. See
+> [`node-ts/README.md`](./node-ts/README.md) for the Node version.
+
+---
+
 Built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**. Runs on
 SQLite out of the box; point `DATABASE_URL` at PostgreSQL for production.
 

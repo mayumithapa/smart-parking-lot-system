@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.log
+
+# Local DBs
+*.sqlite
+*.sqlite3
+*.db
+parking.db*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Env
+.env
+.env.local
