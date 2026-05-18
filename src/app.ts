@@ -5,6 +5,7 @@
 
 import Fastify, { type FastifyInstance } from "fastify";
 import {
+  jsonSchemaTransform,
   serializerCompiler,
   validatorCompiler,
 } from "fastify-type-provider-zod";
@@ -27,6 +28,9 @@ export async function buildApp(args: {
     const swagger = (await import("@fastify/swagger")).default;
     const swaggerUi = (await import("@fastify/swagger-ui")).default;
     await app.register(swagger, {
+      // Convert Zod route schemas to JSON Schema so @fastify/swagger can
+      // emit a valid OpenAPI 3 spec at /docs/json.
+      transform: jsonSchemaTransform,
       openapi: {
         info: {
           title: "Smart Parking Lot — Node.js",
